@@ -1441,6 +1441,7 @@ function Peer(id, options) {
   this.destroyed = false; // Connections have been killed
   this.disconnected = false; // Connection to PeerServer killed manually but P2P connections still active
   this.open = false; // Sockets and such are not yet open.
+  this.sdpTransform = null; // sdp transform function.
   //
 
   // References
@@ -1562,7 +1563,8 @@ Peer.prototype._handleMessage = function(message) {
           var connection = new MediaConnection(peer, this, {
             connectionId: connectionId,
             _payload: payload,
-            metadata: payload.metadata
+            metadata: payload.metadata,
+            sdpTransform: this.sdpTransform
           });
           this._addConnection(peer, connection);
           this.emit('call', connection);
@@ -1664,6 +1666,8 @@ Peer.prototype.call = function(peer, stream, options) {
   }
   options = options || {};
   options._stream = stream;
+  this.sdpTransform = options.sdpTransform;
+
   var call = new MediaConnection(peer, this, options);
   this._addConnection(peer, call);
   return call;
@@ -2259,10 +2263,22 @@ Negotiator._startPeerConnection = function(connection) {
   var optional = {};
 
   if (connection.type === 'data' && !util.supports.sctp) {
-    optional = {optional: [{RtpDataChannels: true}]};
+    optional = {
+      mandatory: { "googIPv6": true },
+      optional: [
+        { "RtpDataChannels": true },
+        { "googImprovedWifiBwe": true },
+      ]
+    };
   } else if (connection.type === 'media') {
     // Interop req for chrome.
-    optional = {optional: [{DtlsSrtpKeyAgreement: true}]};
+    optional = {
+      mandatory: { "googIPv6": true },
+      optional: [
+        { "DtlsSrtpKeyAgreement": true },
+        { "googImprovedWifiBwe": true }
+      ]
+    };
   }
 
   var pc = new RTCPeerConnection(connection.provider.options.config, optional);
@@ -2363,6 +2379,20 @@ Negotiator._makeOffer = function(connection) {
       offer.sdp = Reliable.higherBandwidthSDP(offer.sdp);
     }
 
+ 
+    /**
+     *
+     * add features to transform sdp, so that we can change
+     * media format (G.711 => Opus, vp8 => H.264)
+     *
+     * base iedea is broughted by (not marged yet, cause it is too rough)
+     * https://github.com/peers/peerjs/blob/84fe0ee2d92d8e6d1a9926efcd1873f1b7cce324/lib/negotiator.js
+     */
+    if (connection.options.sdpTransform && typeof connection.options.sdpTransform === 'function') {
+       // to enable conditional branch instruction, includes connection object.
+       offer.sdp = connection.options.sdpTransform(offer.sdp, connection) || offer.sdp;
+    }
+
     pc.setLocalDescription(offer, function() {
       util.log('Set localDescription: offer', 'for:', connection.peer);
       connection.provider.socket.send({
@@ -2398,6 +2428,13 @@ Negotiator._makeAnswer = function(connection) {
     if (!util.supports.sctp && connection.type === 'data' && connection.reliable) {
       answer.sdp = Reliable.higherBandwidthSDP(answer.sdp);
     }
+
+    if (connection.options.sdpTransform && typeof connection.options.sdpTransform === 'function') {
+       // to enable conditional branch instruction, includes connection object.
+       answer.sdp = connection.options.sdpTransform(answer.sdp, connection) || answer.sdp;
+    }
+
+
 
     pc.setLocalDescription(answer, function() {
       util.log('Set localDescription: answer', 'for:', connection.peer);
